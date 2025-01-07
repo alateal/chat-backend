@@ -81,6 +81,34 @@ app.get('/api/users', requireAuth({ signInUrl: '/sign-in' }), async (req, res) =
   }
 });
 
+app.post('/api/channels', requireAuth({ signInUrl: '/sign-in' }), async (req, res) => {
+  try {
+    const { userId } = req.auth;
+    const { name } = req.body;
+
+    if (!name) {
+      return res.status(400).json({ error: 'Channel name is required' });
+    }
+
+    const { data: channel, error } = await supabase
+      .from('channels')
+      .insert([
+        { 
+          name,
+          created_by: userId,
+        }
+      ])
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.status(201).json(channel);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: 'Error creating channel' });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Example app listening at http://localhost:${PORT}`)
