@@ -1,6 +1,6 @@
 require('dotenv').config()
 const express = require('express')
-const { clerkClient, requireAuth } = require('@clerk/express')
+const { clerkClient, requireAuth, Webhook } = require('@clerk/express')
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const Pusher = require('pusher');
@@ -22,7 +22,7 @@ app.use((req, res, next) => {
 });
 
 app.use(cors({
-  origin: 'http://localhost:5173',
+  origin: ['http://localhost:5173', 'https://your-ngrok-url.ngrok.io'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -274,13 +274,16 @@ app.post('/api/conversations', requireAuth({ signInUrl: '/sign-in' }), async (re
 
     if (createError) throw createError;
 
-    // Add both users to conversation
+    // Add both users to conversation, ignore conflicts
     const { error: membersError } = await supabase
       .from('conversation_members')
-      .insert([
+      .upsert([
         { user_id: userId, conversation_id: conversation.id },
         { user_id: otherUserId, conversation_id: conversation.id }
-      ]);
+      ], {
+        onConflict: 'user_id,conversation_id',
+        ignoreDuplicates: true
+      });
 
     if (membersError) throw membersError;
 
@@ -393,20 +396,32 @@ app.post('/api/users/status', requireAuth({ signInUrl: '/sign-in' }), async (req
     const { userId } = req.auth;
     const { isOnline } = req.body;
 
-    // Update user status in conversation_members
-    const { error: updateError } = await supabase
-      .from('conversation_members')
-      .update({ is_online: isOnline })
-      .eq('user_id', userId);
+    // First check if user exists in user_status
+    const { data: existingStatus } = await supabase
+      .from('user_status')
+      .select()
+      .eq('user_id', userId)
+      .single();
 
-    if (updateError) throw updateError;
+    if (!existingStatus) {
+      // Create a new status entry
+      await supabase
+        .from('user_status')
+        .insert([{ user_id: userId, is_online: isOnline }]);
+    } else {
+      // Update existing status
+      await supabase
+        .from('user_status')
+        .update({ is_online: isOnline })
+        .eq('user_id', userId);
+    }
 
     // Get user details for the status update event
     const user = await clerkClient.users.getUser(userId);
     const statusUpdate = {
       userId,
       isOnline,
-      username: `${user.firstName} ${user.lastName}`,
+      username: user.username,
       imageUrl: user.imageUrl
     };
 
@@ -423,16 +438,16 @@ app.post('/api/users/status', requireAuth({ signInUrl: '/sign-in' }), async (req
 // Get all users with their online status
 app.get('/api/users/status', requireAuth({ signInUrl: '/sign-in' }), async (req, res) => {
   try {
-    const { data: members, error } = await supabase
-      .from('conversation_members')
+    const { data: statuses, error } = await supabase
+      .from('user_status')
       .select('user_id, is_online')
       .order('user_id');
 
     if (error) throw error;
 
     // Create a map of user statuses
-    const userStatuses = members.reduce((acc, member) => {
-      acc[member.user_id] = member.is_online;
+    const userStatuses = statuses.reduce((acc, status) => {
+      acc[status.user_id] = status.is_online;
       return acc;
     }, {});
 
@@ -441,6 +456,59 @@ app.get('/api/users/status', requireAuth({ signInUrl: '/sign-in' }), async (req,
     console.error('Error fetching user statuses:', error);
     res.status(500).json({ error: 'Error fetching user statuses' });
   }
+});
+
+app.post('/api/webhooks/clerk', 
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    try {
+      // Verify the webhook
+      const webhook = new Webhook(process.env.CLERK_WEBHOOK_SECRET);
+      const event = webhook.verify(JSON.stringify(req.body), req.headers);
+
+      if (event.type === 'session.created') {
+        const userId = event.data.user_id;
+        
+        // Update user status to online
+        await supabase
+          .from('user_status')
+          .upsert({ user_id: userId, is_online: true }, { onConflict: 'user_id' });
+
+        // Get user details for the status update event
+        const user = await clerkClient.users.getUser(userId);
+        const statusUpdate = {
+          userId,
+          isOnline: true,
+          username: user.username,
+          imageUrl: user.imageUrl
+        };
+
+        await pusher.trigger('presence', 'status-updated', statusUpdate);
+      }
+
+      if (event.type === 'session.ended') {
+        const userId = event.data.user_id;
+        
+        await supabase
+          .from('user_status')
+          .upsert({ user_id: userId, is_online: false }, { onConflict: 'user_id' });
+
+        const user = await clerkClient.users.getUser(userId);
+        const statusUpdate = {
+          userId,
+          isOnline: false,
+          username: user.username,
+          imageUrl: user.imageUrl
+        };
+
+        await pusher.trigger('presence', 'status-updated', statusUpdate);
+      }
+
+      res.json({ received: true });
+    } catch (error) {
+      console.error('Webhook error:', error);
+      res.status(400).json({ error: 'Webhook error' });
+    }
 });
 
 app.use((err, req, res, next) => {
