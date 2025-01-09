@@ -151,6 +151,10 @@ app.post('/api/messages', requireAuth({ signInUrl: '/sign-in' }), async (req, re
 
     // Trigger Pusher event with the enhanced message
     await pusher.trigger(`channel-${channel_id}`, 'new-message', messageWithUser);
+    console.log('Triggered channel message:', {
+      channel: `channel-${channel_id}`,
+      message: messageWithUser
+    });
 
     res.status(201).json(messageWithUser);
   } catch (error) {
@@ -165,10 +169,10 @@ app.post('/api/messages/:messageId/reactions', requireAuth({ signInUrl: '/sign-i
     const { messageId } = req.params;
     const { emoji } = req.body;
 
-    // First get the current message
+    // Get message with both channel_id and conversation_id
     const { data: message, error: fetchError } = await supabase
       .from('messages')
-      .select('reactions, channel_id')
+      .select('reactions, channel_id, conversation_id')
       .eq('id', messageId)
       .single();
 
@@ -179,28 +183,23 @@ app.post('/api/messages/:messageId/reactions', requireAuth({ signInUrl: '/sign-i
     const existingReactionIndex = reactions.findIndex(r => r.emoji === emoji);
     
     if (existingReactionIndex >= 0) {
-      // If user already reacted, remove their reaction
       if (reactions[existingReactionIndex].users.includes(userId)) {
         reactions[existingReactionIndex].users = reactions[existingReactionIndex].users
           .filter(id => id !== userId);
-        
-        // Remove the reaction entirely if no users left
         if (reactions[existingReactionIndex].users.length === 0) {
           reactions = reactions.filter((_, index) => index !== existingReactionIndex);
         }
       } else {
-        // Add user to existing reaction
         reactions[existingReactionIndex].users.push(userId);
       }
     } else {
-      // Create new reaction
       reactions.push({
         emoji,
         users: [userId]
       });
     }
 
-    // Update the message with new reactions
+    // Update the message
     const { data: updatedMessage, error: updateError } = await supabase
       .from('messages')
       .update({ reactions })
@@ -210,13 +209,237 @@ app.post('/api/messages/:messageId/reactions', requireAuth({ signInUrl: '/sign-i
 
     if (updateError) throw updateError;
 
-    // Trigger Pusher event for the reaction update
-    await pusher.trigger(`channel-${message.channel_id}`, 'message-updated', updatedMessage);
+    // Add user data to the updated message
+    const user = await clerkClient.users.getUser(updatedMessage.created_by);
+    const messageWithUser = {
+      ...updatedMessage,
+      user: {
+        id: user.id,
+        username: `${user.firstName} ${user.lastName}`,
+        imageUrl: user.imageUrl
+      }
+    };
 
-    res.json(updatedMessage);
+    // Trigger appropriate Pusher event based on message type
+    const eventChannel = message.channel_id 
+      ? `channel-${message.channel_id}`
+      : `conversation-${message.conversation_id}`;
+
+    await pusher.trigger(eventChannel, 'message-updated', messageWithUser);
+    console.log('Triggered reaction update:', {
+      channel: eventChannel,
+      message: messageWithUser
+    });
+
+    res.json(messageWithUser);
   } catch (error) {
     console.error('Error updating reaction:', error);
     res.status(500).json({ error: 'Error updating reaction' });
+  }
+});
+
+// Get or create conversation between two users
+app.post('/api/conversations', requireAuth({ signInUrl: '/sign-in' }), async (req, res) => {
+  try {
+    const { userId } = req.auth;
+    const { otherUserId } = req.body;
+
+    // First try to find existing conversation
+    const { data: existingMembers, error: findError } = await supabase
+      .from('conversation_members')
+      .select('conversation_id')
+      .in('user_id', [userId, otherUserId]);
+
+    if (findError) throw findError;
+
+    // Group by conversation_id and find one with both users
+    const conversationCounts = existingMembers.reduce((acc, member) => {
+      acc[member.conversation_id] = (acc[member.conversation_id] || 0) + 1;
+      return acc;
+    }, {});
+
+    const existingConversationId = Object.entries(conversationCounts)
+      .find(([_, count]) => count === 2)?.[0];
+
+    if (existingConversationId) {
+      return res.json({ conversation: { id: existingConversationId } });
+    }
+
+    // Create new conversation if none exists
+    const { data: conversation, error: createError } = await supabase
+      .from('conversations')
+      .insert([{}])
+      .select()
+      .single();
+
+    if (createError) throw createError;
+
+    // Add both users to conversation
+    const { error: membersError } = await supabase
+      .from('conversation_members')
+      .insert([
+        { user_id: userId, conversation_id: conversation.id },
+        { user_id: otherUserId, conversation_id: conversation.id }
+      ]);
+
+    if (membersError) throw membersError;
+
+    res.json({ conversation });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: 'Error creating conversation' });
+  }
+});
+
+// Get messages for a conversation with pagination
+app.get('/api/conversations/:conversationId/messages', requireAuth({ signInUrl: '/sign-in' }), async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { userId } = req.auth;
+    const { page = 0, limit = 50 } = req.query;
+
+    // Verify user is part of conversation
+    const { data: member, error: memberError } = await supabase
+      .from('conversation_members')
+      .select()
+      .eq('conversation_id', conversationId)
+      .eq('user_id', userId)
+      .single();
+
+    if (memberError || !member) {
+      return res.status(403).json({ error: 'Not authorized to view this conversation' });
+    }
+
+    // Fetch messages with pagination
+    const { data: messages, error, count } = await supabase
+      .from('messages')
+      .select('*', { count: 'exact' })
+      .eq('conversation_id', conversationId)
+      .order('created_at', { ascending: false })
+      .range(page * limit, (page + 1) * limit - 1);
+
+    if (error) throw error;
+
+    // Add user data to messages
+    const messagesWithUsers = await Promise.all(messages.map(async (message) => {
+      const user = await clerkClient.users.getUser(message.created_by);
+      return {
+        ...message,
+        user: {
+          id: user.id,
+          username: `${user.firstName} ${user.lastName}`,
+          imageUrl: user.imageUrl
+        }
+      };
+    }));
+
+    res.json({ 
+      messages: messagesWithUsers.reverse(), 
+      total: count,
+      hasMore: count > (page + 1) * limit
+    });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: 'Error fetching messages' });
+  }
+});
+
+// Send message in conversation
+app.post('/api/conversations/:conversationId/messages', requireAuth({ signInUrl: '/sign-in' }), async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { userId } = req.auth;
+    const { content } = req.body;
+
+    const user = await clerkClient.users.getUser(userId);
+
+    const { data: message, error } = await supabase
+      .from('messages')
+      .insert([{
+        content,
+        conversation_id: conversationId,
+        created_by: userId,
+      }])
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    const messageWithUser = {
+      ...message,
+      user: {
+        id: user.id,
+        username: `${user.firstName} ${user.lastName}`,
+        imageUrl: user.imageUrl
+      }
+    };
+
+    await pusher.trigger(`conversation-${conversationId}`, 'new-message', messageWithUser);
+    console.log('Triggered direct message:', {
+      channel: `conversation-${conversationId}`,
+      message: messageWithUser
+    });
+
+    res.json(messageWithUser);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: 'Error sending message' });
+  }
+});
+
+// Update user online status
+app.post('/api/users/status', requireAuth({ signInUrl: '/sign-in' }), async (req, res) => {
+  try {
+    const { userId } = req.auth;
+    const { isOnline } = req.body;
+
+    // Update user status in conversation_members
+    const { error: updateError } = await supabase
+      .from('conversation_members')
+      .update({ is_online: isOnline })
+      .eq('user_id', userId);
+
+    if (updateError) throw updateError;
+
+    // Get user details for the status update event
+    const user = await clerkClient.users.getUser(userId);
+    const statusUpdate = {
+      userId,
+      isOnline,
+      username: `${user.firstName} ${user.lastName}`,
+      imageUrl: user.imageUrl
+    };
+
+    // Trigger Pusher event for status update
+    await pusher.trigger('presence', 'status-updated', statusUpdate);
+
+    res.json(statusUpdate);
+  } catch (error) {
+    console.error('Error updating status:', error);
+    res.status(500).json({ error: 'Error updating status' });
+  }
+});
+
+// Get all users with their online status
+app.get('/api/users/status', requireAuth({ signInUrl: '/sign-in' }), async (req, res) => {
+  try {
+    const { data: members, error } = await supabase
+      .from('conversation_members')
+      .select('user_id, is_online')
+      .order('user_id');
+
+    if (error) throw error;
+
+    // Create a map of user statuses
+    const userStatuses = members.reduce((acc, member) => {
+      acc[member.user_id] = member.is_online;
+      return acc;
+    }, {});
+
+    res.json({ userStatuses });
+  } catch (error) {
+    console.error('Error fetching user statuses:', error);
+    res.status(500).json({ error: 'Error fetching user statuses' });
   }
 });
 
