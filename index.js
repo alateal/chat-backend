@@ -4,6 +4,9 @@ const { clerkClient, requireAuth, Webhook } = require('@clerk/express')
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const Pusher = require('pusher');
+const multer = require('multer');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const crypto = require('crypto');
 
 const app = express()
 const PORT = process.env.PORT || 3000;
@@ -62,7 +65,7 @@ app.get('/api/messages', requireAuth({ signInUrl: '/sign-in' }), async (req, res
     const { data: messages, error } = await supabase
       .from('messages')
       .select('*')
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: true });
 
     if (error) throw error;
 
@@ -119,10 +122,14 @@ app.post('/api/channels', requireAuth({ signInUrl: '/sign-in' }), async (req, re
 app.post('/api/messages', requireAuth({ signInUrl: '/sign-in' }), async (req, res) => {
   try {
     const { userId } = req.auth;
-    const { content, channel_id } = req.body;
+    const { content, channel_id, files } = req.body;
 
-    if (!content || !channel_id) {
-      return res.status(400).json({ error: 'Content and channel_id are required' });
+    if (!content && !files?.length) {
+      return res.status(400).json({ error: 'Content or files required' });
+    }
+
+    if (!channel_id) {
+      return res.status(400).json({ error: 'Channel ID required' });
     }
 
     const user = await clerkClient.users.getUser(userId);
@@ -133,30 +140,24 @@ app.post('/api/messages', requireAuth({ signInUrl: '/sign-in' }), async (req, re
         content,
         channel_id,
         created_by: userId,
+        file_attachments: files?.length ? { files } : null,
       }])
       .select()
       .single();
 
     if (error) throw error;
 
-    // Add user data to the message before sending through Pusher
     const messageWithUser = {
       ...message,
       user: {
         id: user.id,
-        username: `${user.firstName} ${user.lastName}`,
+        username: user.username,
         imageUrl: user.imageUrl
       }
     };
 
-    // Trigger Pusher event with the enhanced message
     await pusher.trigger(`channel-${channel_id}`, 'new-message', messageWithUser);
-    console.log('Triggered channel message:', {
-      channel: `channel-${channel_id}`,
-      message: messageWithUser
-    });
-
-    res.status(201).json(messageWithUser);
+    res.json(messageWithUser);
   } catch (error) {
     console.error('Error:', error);
     res.status(500).json({ error: 'Error creating message' });
@@ -318,7 +319,7 @@ app.get('/api/conversations/:conversationId/messages', requireAuth({ signInUrl: 
       .from('messages')
       .select('*', { count: 'exact' })
       .eq('conversation_id', conversationId)
-      .order('created_at', { ascending: false })
+      .order('created_at', { ascending: true })
       .range(page * limit, (page + 1) * limit - 1);
 
     if (error) throw error;
@@ -352,16 +353,18 @@ app.post('/api/conversations/:conversationId/messages', requireAuth({ signInUrl:
   try {
     const { conversationId } = req.params;
     const { userId } = req.auth;
-    const { content } = req.body;
+    const { content, files } = req.body;
 
     const user = await clerkClient.users.getUser(userId);
 
+    // Create message with file attachments
     const { data: message, error } = await supabase
       .from('messages')
       .insert([{
         content,
         conversation_id: conversationId,
         created_by: userId,
+        file_attachments: files ? { files } : null,
       }])
       .select()
       .single();
@@ -372,7 +375,7 @@ app.post('/api/conversations/:conversationId/messages', requireAuth({ signInUrl:
       ...message,
       user: {
         id: user.id,
-        username: `${user.firstName} ${user.lastName}`,
+        username: user.username,
         imageUrl: user.imageUrl
       }
     };
@@ -511,6 +514,69 @@ app.post('/api/webhooks/clerk',
     }
 });
 
+// Initialize S3 client
+const s3Client = new S3Client({
+  region: process.env.AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  },
+});
+
+// Configure multer for file upload
+const upload = multer({
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  }
+});
+
+// File upload endpoint
+app.post('/api/files/upload', 
+  requireAuth({ signInUrl: '/sign-in' }),
+  upload.single('file'),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+      }
+
+      const { userId } = req.auth;
+      const file = req.file;
+      
+      // Generate unique filename and ID
+      const fileId = crypto.randomBytes(16).toString('hex');
+      const fileExtension = file.originalname.split('.').pop();
+      const fileName = `${fileId}.${fileExtension}`;
+      
+      // Upload to S3
+      const uploadParams = {
+        Bucket: process.env.AWS_BUCKET_NAME,
+        Key: fileName,
+        Body: file.buffer,
+        ContentType: file.mimetype
+      };
+      
+      await s3Client.send(new PutObjectCommand(uploadParams));
+      
+      // Return file metadata to be stored in message's file_attachments
+      const fileMetadata = {
+        id: fileId,
+        file_name: file.originalname,
+        file_type: file.mimetype,
+        file_size: file.size,
+        file_url: `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`
+      };
+
+      res.json(fileMetadata);
+    } catch (error) {
+      console.error('Detailed upload error:', error);
+      res.status(500).json({ 
+        error: 'Error uploading file',
+        details: error.message
+      });
+    }
+});
+
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ error: 'Something broke!' });
@@ -535,3 +601,17 @@ console.log('Server config:', {
   hasSupabaseKeys: !!process.env.SUPABASE_KEY,
   hasPusherKeys: !!process.env.PUSHER_KEY
 });
+
+// After creating the bucket or updating its settings, add this policy to make objects public:
+const bucketPolicy = {
+  Version: "2012-10-17",
+  Statement: [
+    {
+      Sid: "PublicReadGetObject",
+      Effect: "Allow",
+      Principal: "*",
+      Action: "s3:GetObject",
+      Resource: `arn:aws:s3:::chatgeniusal/*`
+    }
+  ]
+};

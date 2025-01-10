@@ -1,52 +1,54 @@
 # Database Schema Description
 
-## Tables and Relationships
-
-### **messages**
-- **Purpose**: Stores all messages exchanged in channels or conversations.
-- **Fields**:
-  - `id` (int8): Primary key, uniquely identifies each message.
-  - `created_at` (timestamptz): The timestamp when the message was created.
-  - `content` (text): The text content of the message.
-  - `created_by` (text): The user ID of the creator of the message.
-  - `channel_id` (int8): Foreign key linking the message to a specific channel (references `channels.id`).
-  - `reactions` (jsonb): JSON object storing reactions to the message.
-  - `conversation_id` (int8): Foreign key linking the message to a specific conversation (references `conversations.id`).
-
----
-
-### **channels**
-- **Purpose**: Represents communication channels within the application.
-- **Fields**:
-  - `id` (int8): Primary key, uniquely identifies each channel.
-  - `created_at` (timestamptz): The timestamp when the channel was created.
-  - `name` (text): The name of the channel.
-  - `created_by` (text): The user ID of the channel creator.
-
----
-
-### **conversations**
-- **Purpose**: Represents direct messages (DMs) or group conversations.
-- **Fields**:
-  - `id` (int8): Primary key, uniquely identifies each conversation.
-  - `created_at` (timestamptz): The timestamp when the conversation was created.
-
----
-
-### **conversation_members**
-- **Purpose**: Tracks the participants of a conversation.
-- **Fields**:
-  - `user_id` (text): User ID of a participant in the conversation.
-  - `created_at` (timestamptz): The timestamp when the user joined the conversation.
-  - `conversation_id` (int8): Foreign key linking the participant to a specific conversation (references `conversations.id`).
-
----
+## Tables and Fields
 
 ### **user_status**
 - **Purpose**: Tracks the online status of users.
 - **Fields**:
-  - `user_id` (int8): Primary key, uniquely identifies the user.
-  - `is_online` (bool): Boolean field indicating if the user is online (`true`) or offline (`false`).
+  - `id` (int8): Primary key, uniquely identifies the record.
+  - `is_online` (bool): Indicates if a user is online (`true`) or offline (`false`).
+  - `user_id` (text): Foreign key linking to the user.
+
+---
+
+### **messages**
+- **Purpose**: Stores messages exchanged between users in conversations or channels.
+- **Fields**:
+  - `id` (int8): Primary key, uniquely identifies the message.
+  - `created_at` (timestamptz): Timestamp indicating when the message was created.
+  - `content` (text): The content of the message.
+  - `created_by` (text): User ID of the message creator.
+  - `channel_id` (int8): Foreign key referencing `channels.id`.
+  - `reactions` (jsonb): JSON object representing reactions to the message.
+  - `conversation_id` (int8): Foreign key referencing `conversations.id`.
+  - `file_attachments` (jsonb): JSON object storing details of file attachments.
+
+---
+
+### **channels**
+- **Purpose**: Represents communication channels.
+- **Fields**:
+  - `id` (int8): Primary key, uniquely identifies the channel.
+  - `created_at` (timestamptz): Timestamp indicating when the channel was created.
+  - `name` (text): The name of the channel.
+  - `created_by` (text): User ID of the channel creator.
+
+---
+
+### **conversations**
+- **Purpose**: Represents private conversations or direct messages between users.
+- **Fields**:
+  - `id` (int8): Primary key, uniquely identifies the conversation.
+  - `created_at` (timestamptz): Timestamp indicating when the conversation was created.
+
+---
+
+### **conversation_members**
+- **Purpose**: Tracks members of a conversation.
+- **Fields**:
+  - `user_id` (text): User ID of the participant.
+  - `created_at` (timestamptz): Timestamp indicating when the user joined the conversation.
+  - `conversation_id` (int8): Foreign key referencing `conversations.id`.
 
 ---
 
@@ -55,4 +57,10 @@
 2. **messages.conversation_id** → Foreign key referencing **conversations.id**.
 3. **conversation_members.conversation_id** → Foreign key referencing **conversations.id**.
 
-This schema ensures clear separation between channels, conversations, and their participants, while also supporting user status tracking and message reactions.
+---
+
+This schema supports a system that allows:
+- Tracking user online statuses.
+- Messaging functionality with support for file attachments and reactions.
+- Communication within channels or private conversations (DMs).
+- User membership in conversations.
