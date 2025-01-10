@@ -31,17 +31,10 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-app.get('/protected', requireAuth({ signInUrl: '/sign-in' }), async (req, res) => {
-  const { userId } = req.auth
-  const user = await clerkClient.users.getUser(userId)
-  return res.json({ user })
-})
-
 app.get('/sign-in', (req, res) => {
   // Assuming you have a template engine installed and are using a Clerk JavaScript SDK on this page
   res.redirect('/')
 })
-
 
 
 app.get('/api/channels', requireAuth({ signInUrl: '/sign-in' }), async (req, res) => {
@@ -597,13 +590,6 @@ const pusher = new Pusher({
   secret: process.env.PUSHER_SECRET,
   cluster: process.env.PUSHER_CLUSTER,
   useTLS: true
-});
-
-console.log('Server config:', {
-  port: PORT,
-  hasClerkKeys: !!process.env.CLERK_SECRET_KEY,
-  hasSupabaseKeys: !!process.env.SUPABASE_KEY,
-  hasPusherKeys: !!process.env.PUSHER_KEY
 });
 
 // After creating the bucket or updating its settings, add this policy to make objects public:
