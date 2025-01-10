@@ -1,6 +1,7 @@
-require('dotenv').config()
 const express = require('express')
-const { clerkClient, requireAuth, Webhook } = require('@clerk/express')
+const dotenv = require('dotenv').config()
+const { Webhook } = require('svix')
+const { clerkClient, requireAuth } = require('@clerk/express')
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const Pusher = require('pusher');
@@ -9,7 +10,13 @@ const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const crypto = require('crypto');
 
 const app = express()
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT;
+
+// Add logging middleware
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
+});
 
 // Initialize Supabase client
 const supabase = createClient(
@@ -220,10 +227,6 @@ app.post('/api/messages/:messageId/reactions', requireAuth({ signInUrl: '/sign-i
       : `conversation-${message.conversation_id}`;
 
     await pusher.trigger(eventChannel, 'message-updated', messageWithUser);
-    console.log('Triggered reaction update:', {
-      channel: eventChannel,
-      message: messageWithUser
-    });
 
     res.json(messageWithUser);
   } catch (error) {
@@ -372,12 +375,6 @@ app.post('/api/conversations/:conversationId/messages', requireAuth({ signInUrl:
         imageUrl: user.imageUrl
       }
     };
-
-    await pusher.trigger(`conversation-${conversationId}`, 'new-message', messageWithUser);
-    console.log('Triggered direct message:', {
-      channel: `conversation-${conversationId}`,
-      message: messageWithUser
-    });
 
     res.json(messageWithUser);
   } catch (error) {
