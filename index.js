@@ -25,7 +25,7 @@ app.use((req, res, next) => {
 });
 
 app.use(cors({
-  origin: ['http://localhost:5173', 'https://your-ngrok-url.ngrok.io'],
+  origin: [process.env.FRONTEND_URL],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -580,6 +580,10 @@ app.post('/api/files/upload',
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ error: 'Something broke!' });
+});
+
+app.get("/", (req, res) => {
+  res.send("Hello World");
 });
 
 app.listen(PORT, () => {
