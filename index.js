@@ -479,7 +479,7 @@ app.post('/api/webhooks/clerk',
         await pusher.trigger('presence', 'status-updated', statusUpdate);
       }
 
-      if (event.type === 'session.ended') {
+      if (event.type === 'session.removed' || event.type === 'session.ended') {
         const userId = event.data.user_id;
         
         await supabase
