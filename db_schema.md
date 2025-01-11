@@ -22,7 +22,7 @@
   - `reactions` (jsonb): JSON object representing reactions to the message.
   - `conversation_id` (int8): Foreign key referencing `conversations.id`.
   - `file_attachments` (jsonb): JSON object storing details of file attachments.
-
+  - `parent_message_id` (int8): Foreign key referencing `messages.id`.
 ---
 
 ### **channels**
