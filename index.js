@@ -607,7 +607,6 @@ const bucketPolicy = {
 app.get('/api/search', requireAuth({ signInUrl: '/sign-in' }), async (req, res) => {
   try {
     const { query } = req.query;
-    console.log('Search query received:', query);
 
     if (!query || query.length < 1) {
       return res.json({ messages: [], users: [], files: [], channels: [] });
@@ -634,9 +633,8 @@ app.get('/api/search', requireAuth({ signInUrl: '/sign-in' }), async (req, res) 
           const firstName = user.firstName || '';
           const lastName = user.lastName || '';
           const username = user.username || '';
-          const emailAddress = user.emailAddresses?.[0]?.emailAddress || '';
           
-          const searchString = `${firstName} ${lastName} ${username} ${emailAddress}`.toLowerCase();
+          const searchString = `${firstName} ${lastName} ${username}`.toLowerCase();
           const searchQuery = query.toLowerCase();
           
           return searchString.includes(searchQuery);
