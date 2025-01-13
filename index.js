@@ -10,6 +10,26 @@ const apiRouter = require('./api');
 const app = express()
 const PORT = process.env.PORT;
 
+const indexName = 'quickstart';
+const { Pinecone } = require('@pinecone-database/pinecone');
+const { ChatOpenAI } = require("langchain/chat_models/openai");
+
+
+await pc.createIndex({
+  name: indexName,
+  dimension: 2, // Replace with your model dimensions
+  metric: 'cosine', // Replace with your model metric
+  spec: { 
+    serverless: { 
+      cloud: 'aws', 
+      region: 'us-east-1' 
+    }
+  } 
+});
+
+const llm = new ChatOpenAI();
+await llm.invoke("Hello, world!");
+
 // Add logging middleware
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);

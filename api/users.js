@@ -75,9 +75,6 @@ module.exports = function () {
         imageUrl: user.imageUrl,
       };
 
-      // Trigger Pusher event for status update
-      await pusher.trigger("presence", "status-updated", statusUpdate);
-
       res.json(statusUpdate);
     } catch (error) {
       console.error("Error updating status:", error);
