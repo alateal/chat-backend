@@ -1,5 +1,5 @@
 const express = require('express');
-const { clerkClient } = require('@clerk/clerk-sdk-node');
+const { clerkClient } = require('@clerk/express');
 const supabase = require('../supabase');
 const pusher = require('../pusher');
 
