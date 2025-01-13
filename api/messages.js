@@ -24,14 +24,14 @@ module.exports = function () {
   router.post("/", async (req, res) => {
     try {
       const { userId } = req.auth;
-      const { content, channel_id, files } = req.body;
+      const { content, files, conversation_id, parent_message_id } = req.body;
 
       if (!content && !files?.length) {
         return res.status(400).json({ error: "Content or files required" });
       }
 
-      if (!channel_id) {
-        return res.status(400).json({ error: "Channel ID required" });
+      if (!conversation_id) {
+        return res.status(400).json({ error: "Conversation ID required" });
       }
 
       const user = await clerkClient.users.getUser(userId);
@@ -41,9 +41,10 @@ module.exports = function () {
         .insert([
           {
             content,
-            channel_id,
+            conversation_id,
             created_by: userId,
-            file_attachments: files?.length ? { files } : null,
+            file_attachments: files?.length ? files : null,
+            parent_message_id: parent_message_id || null,
           },
         ])
         .select()
@@ -51,21 +52,12 @@ module.exports = function () {
 
       if (error) throw error;
 
-      const messageWithUser = {
-        ...message,
-        user: {
-          id: user.id,
-          username: user.username,
-          imageUrl: user.imageUrl,
-        },
-      };
-
       await pusher.trigger(
-        `channel-${channel_id}`,
+        `conversation-${conversation_id}`,
         "new-message",
-        messageWithUser
+        message
       );
-      res.json(messageWithUser);
+      res.json(message);
     } catch (error) {
       console.error("Error:", error);
       res.status(500).json({ error: "Error creating message" });
@@ -123,25 +115,15 @@ module.exports = function () {
 
       if (updateError) throw updateError;
 
-      // Add user data to the updated message
-      const user = await clerkClient.users.getUser(updatedMessage.created_by);
-      const messageWithUser = {
-        ...updatedMessage,
-        user: {
-          id: user.id,
-          username: `${user.firstName} ${user.lastName}`,
-          imageUrl: user.imageUrl,
-        },
-      };
 
       // Trigger appropriate Pusher event based on message type
       const eventChannel = message.channel_id
         ? `channel-${message.channel_id}`
         : `conversation-${message.conversation_id}`;
 
-      await pusher.trigger(eventChannel, "message-updated", messageWithUser);
+      await pusher.trigger(eventChannel, "message-updated", updatedMessage);
 
-      res.json(messageWithUser);
+      res.json(updatedMessage);
     } catch (error) {
       console.error("Error updating reaction:", error);
       res.status(500).json({ error: "Error updating reaction" });

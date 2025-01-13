@@ -2,61 +2,51 @@ const express = require("express");
 const router = express.Router();
 const { clerkClient } = require("@clerk/express");
 const supabase = require("../supabase");
+const pusher = require("../pusher");
 
 module.exports = function () {
   router.get("/:conversationId/messages", async (req, res) => {
     try {
       const { conversationId } = req.params;
       const { userId } = req.auth;
-      const { page = 0, limit = 50 } = req.query;
 
-      // Verify user is part of conversation
-      const { data: member, error: memberError } = await supabase
-        .from("conversation_members")
-        .select()
-        .eq("conversation_id", conversationId)
-        .eq("user_id", userId)
+      // Get conversation with members
+      const { data: conversation, error: convError } = await supabase
+        .from("conversations")
+        .select(`
+          *,
+          conversation_members!inner (
+            user_id
+          )
+        `)
+        .eq("id", conversationId)
         .single();
 
-      if (memberError || !member) {
-        return res
-          .status(403)
-          .json({ error: "Not authorized to view this conversation" });
+      if (convError) throw convError;
+
+      // Format conversation members
+      const conversation_members = conversation.conversation_members.map(m => m.user_id);
+
+      // Verify user is part of conversation
+      if (!conversation_members.includes(userId)) {
+        return res.status(403).json({ error: "Not authorized to view this conversation" });
       }
 
-      // Fetch messages with pagination
-      const {
-        data: messages,
-        error,
-        count,
-      } = await supabase
+      // Fetch messages
+      const { data: messages, error } = await supabase
         .from("messages")
-        .select("*", { count: "exact" })
+        .select("*")
         .eq("conversation_id", conversationId)
-        .order("created_at", { ascending: true })
-        .range(page * limit, (page + 1) * limit - 1);
+        .order("created_at", { ascending: true });
 
       if (error) throw error;
 
-      // Add user data to messages
-      const messagesWithUsers = await Promise.all(
-        messages.map(async (message) => {
-          const user = await clerkClient.users.getUser(message.created_by);
-          return {
-            ...message,
-            user: {
-              id: user.id,
-              username: `${user.firstName} ${user.lastName}`,
-              imageUrl: user.imageUrl,
-            },
-          };
-        })
-      );
-
       res.json({
-        messages: messagesWithUsers.reverse(),
-        total: count,
-        hasMore: count > (page + 1) * limit,
+        conversation: {
+          ...conversation,
+          conversation_members
+        },
+        messages
       });
     } catch (error) {
       console.error("Error:", error);
@@ -64,101 +54,147 @@ module.exports = function () {
     }
   });
 
-
-// Send message in conversation
-router.post('/:conversationId/messages', async (req, res) => {
+  // Create new conversation or get existing one
+  router.post("/", async (req, res) => {
     try {
-      const { conversationId } = req.params;
       const { userId } = req.auth;
-      const { content, files } = req.body;
-  
-      const user = await clerkClient.users.getUser(userId);
-  
-      // Create message with file attachments
-      const { data: message, error } = await supabase
-        .from('messages')
+      const { isChannel, name, members } = req.body;
+
+      if (!Array.isArray(members) || members.length === 0) {
+        return res.status(400).json({ error: "Members array is required and must not be empty" });
+      }
+
+      // Include the creator in members if not already present
+      if (!members.includes(userId)) {
+        members.push(userId);
+      }
+
+      if (!isChannel) {
+        // For DMs, try to find existing conversation
+        const { data: existingMembers, error: findError } = await supabase
+          .from("conversation_members")
+          .select("conversation_id")
+          .in("user_id", members);
+
+        if (findError) throw findError;
+
+        // Group by conversation_id and find one with all members
+        const conversationCounts = existingMembers.reduce((acc, member) => {
+          acc[member.conversation_id] = (acc[member.conversation_id] || 0) + 1;
+          return acc;
+        }, {});
+
+        const existingConversationId = Object.entries(conversationCounts)
+          .find(([_, count]) => count === members.length)?.[0];
+
+        if (existingConversationId) {
+          // Return existing conversation with members
+          const { data: existingConversation } = await supabase
+            .from("conversations")
+            .select("*")
+            .eq("id", existingConversationId)
+            .single();
+
+          return res.json({ 
+            conversation: {
+              ...existingConversation,
+              conversation_members: members
+            }
+          });
+        }
+      }
+
+      // Create new conversation
+      const { data: conversation, error: createError } = await supabase
+        .from("conversations")
         .insert([{
-          content,
-          conversation_id: conversationId,
-          created_by: userId,
-          file_attachments: files ? { files } : null,
+          name: name || null,
+          is_channel: isChannel,
+          created_by: userId
         }])
         .select()
         .single();
-  
-      if (error) throw error;
-  
-      const messageWithUser = {
-        ...message,
-        user: {
-          id: user.id,
-          username: user.username,
-          imageUrl: user.imageUrl
+
+      if (createError) throw createError;
+
+      // Add all members to conversation
+      const memberInserts = members.map(memberId => ({
+        user_id: memberId,
+        conversation_id: conversation.id
+      }));
+
+      const { error: membersError } = await supabase
+        .from("conversation_members")
+        .upsert(memberInserts, {
+          onConflict: "user_id,conversation_id",
+          ignoreDuplicates: false
+        });
+
+      if (membersError) throw membersError;
+
+      // Return new conversation with members
+      res.json({ 
+        conversation: {
+          ...conversation,
+          conversation_members: members
         }
-      };
-  
-      res.json(messageWithUser);
+      });
+
     } catch (error) {
-      console.error('Error:', error);
-      res.status(500).json({ error: 'Error sending message' });
+      console.error("Error:", error);
+      res.status(500).json({ error: "Error creating conversation" });
     }
   });
 
-  // Get or create conversation between two users
-  router.post('/', async (req, res) => {
+  router.get("/me", async (req, res) => {
     try {
       const { userId } = req.auth;
-      const { otherUserId } = req.body;
-  
-      // First try to find existing conversation
-      const { data: existingMembers, error: findError } = await supabase
-        .from('conversation_members')
-        .select('conversation_id')
-        .in('user_id', [userId, otherUserId]);
-  
-      if (findError) throw findError;
-  
-      // Group by conversation_id and find one with both users
-      const conversationCounts = existingMembers.reduce((acc, member) => {
-        acc[member.conversation_id] = (acc[member.conversation_id] || 0) + 1;
+
+      // Get all conversations where user is a member
+      const { data: memberOf, error: memberError } = await supabase
+        .from("conversation_members")
+        .select(
+          `
+          conversation_id,
+          conversations:conversation_id (
+            *
+          )
+        `
+        )
+        .eq("user_id", userId);
+
+      if (memberError) throw memberError;
+
+      // Get all members for these conversations
+      const conversationIds = memberOf.map((m) => m.conversation_id);
+      const { data: allMembers, error: membersError } = await supabase
+        .from("conversation_members")
+        .select("user_id, conversation_id")
+        .in("conversation_id", conversationIds);
+
+      if (membersError) throw membersError;
+
+      // Group members by conversation
+      const membersByConversation = allMembers.reduce((acc, member) => {
+        if (!acc[member.conversation_id]) {
+          acc[member.conversation_id] = [];
+        }
+        acc[member.conversation_id].push(member.user_id);
         return acc;
       }, {});
-  
-      const existingConversationId = Object.entries(conversationCounts)
-        .find(([_, count]) => count === 2)?.[0];
-  
-      if (existingConversationId) {
-        return res.json({ conversation: { id: existingConversationId } });
-      }
-  
-      // Create new conversation if none exists
-      const { data: conversation, error: createError } = await supabase
-        .from('conversations')
-        .insert([{}])
-        .select()
-        .single();
-  
-      if (createError) throw createError;
-  
-      // Add both users to conversation, ignore conflicts
-      const { error: membersError } = await supabase
-        .from('conversation_members')
-        .upsert([
-          { user_id: userId, conversation_id: conversation.id },
-          { user_id: otherUserId, conversation_id: conversation.id }
-        ], {
-          onConflict: 'user_id,conversation_id',
-          ignoreDuplicates: true
-        });
-  
-      if (membersError) throw membersError;
-  
-      res.json({ conversation });
+
+      // Format response
+      const conversations = memberOf.map((m) => ({
+        ...m.conversations,
+        conversation_members: membersByConversation[m.conversation_id] || [],
+      }));
+
+      res.json({ conversations });
     } catch (error) {
-      console.error('Error:', error);
-      res.status(500).json({ error: 'Error creating conversation' });
+      console.error("Error fetching conversations:", error);
+      res.status(500).json({ error: "Failed to fetch conversations" });
     }
   });
-  
+
   return router;
 };

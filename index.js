@@ -41,42 +41,75 @@ app.post('/webhooks/clerk',
   express.raw({ type: 'application/json' }),
   async (req, res) => {
     try {
-      // Verify the webhook
       const webhook = new Webhook(process.env.CLERK_WEBHOOK_SECRET);
       const event = webhook.verify(JSON.stringify(req.body), req.headers);
 
+      // Handle user creation
+      if (event.type === 'user.created') {
+        const userId = event.data.id;
+        
+        // Initialize user status
+        await supabase
+          .from('user_status')
+          .insert([{ 
+            user_id: userId, 
+            is_online: false 
+          }]);
+
+        // Get full user details and notify frontend
+        const user = await clerkClient.users.getUser(userId);
+        const newUser = {
+          id: user.id,
+          username: user.username || `${user.firstName} ${user.lastName}`.trim() || 'Unknown User',
+          imageUrl: user.imageUrl,
+          email: user.emailAddresses?.[0]?.emailAddress
+        };
+        await pusher.trigger('presence', 'user-created', newUser);
+        console.log('Initialized status for new user:', userId);
+      }
+
+      // Handle session creation (user going online)
       if (event.type === 'session.created') {
         const userId = event.data.user_id;
         
         // Update user status to online
-        await supabase
+        const { error: updateError } = await supabase
           .from('user_status')
-          .upsert({ user_id: userId, is_online: true }, { onConflict: 'user_id' });
+          .update({ is_online: true })
+          .eq('user_id', userId);
 
-        // Get user details for the status update event
+        if (updateError) throw updateError;
+
+        // Get user details and notify frontend
         const user = await clerkClient.users.getUser(userId);
         const statusUpdate = {
           userId,
           isOnline: true,
-          username: user.username,
+          username: user.username || `${user.firstName} ${user.lastName}`.trim() || 'Unknown User',
           imageUrl: user.imageUrl
         };
 
         await pusher.trigger('presence', 'status-updated', statusUpdate);
       }
 
+      // Handle session end/removal (user going offline)
       if (event.type === 'session.removed' || event.type === 'session.ended') {
         const userId = event.data.user_id;
         
-        await supabase
+        // Update user status to offline
+        const { error: updateError } = await supabase
           .from('user_status')
-          .upsert({ user_id: userId, is_online: false }, { onConflict: 'user_id' });
+          .update({ is_online: false })
+          .eq('user_id', userId);
 
+        if (updateError) throw updateError;
+
+        // Get user details and notify frontend
         const user = await clerkClient.users.getUser(userId);
         const statusUpdate = {
           userId,
           isOnline: false,
-          username: user.username,
+          username: user.username || `${user.firstName} ${user.lastName}`.trim() || 'Unknown User',
           imageUrl: user.imageUrl
         };
 

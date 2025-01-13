@@ -8,7 +8,6 @@
   - `id` (int8): Primary key, uniquely identifies the record.
   - `is_online` (bool): Indicates if a user is online (`true`) or offline (`false`).
   - `user_id` (text): Foreign key linking to the user.
-
 ---
 
 ### **messages**
@@ -18,20 +17,11 @@
   - `created_at` (timestamptz): Timestamp indicating when the message was created.
   - `content` (text): The content of the message.
   - `created_by` (text): User ID of the message creator.
-  - `channel_id` (int8): Foreign key referencing `channels.id`.
   - `reactions` (jsonb): JSON object representing reactions to the message.
   - `conversation_id` (int8): Foreign key referencing `conversations.id`.
   - `file_attachments` (jsonb): JSON object storing details of file attachments.
   - `parent_message_id` (int8): Foreign key referencing `messages.id`.
 ---
-
-### **channels**
-- **Purpose**: Represents communication channels.
-- **Fields**:
-  - `id` (int8): Primary key, uniquely identifies the channel.
-  - `created_at` (timestamptz): Timestamp indicating when the channel was created.
-  - `name` (text): The name of the channel.
-  - `created_by` (text): User ID of the channel creator.
 
 ---
 
@@ -40,6 +30,8 @@
 - **Fields**:
   - `id` (int8): Primary key, uniquely identifies the conversation.
   - `created_at` (timestamptz): Timestamp indicating when the conversation was created.
+  - `name` (text): The name of the conversation.
+  - `created_by` (text): User ID of the conversation creator.
 
 ---
 
@@ -53,9 +45,8 @@
 ---
 
 ## Relationships
-1. **messages.channel_id** → Foreign key referencing **channels.id**.
-2. **messages.conversation_id** → Foreign key referencing **conversations.id**.
-3. **conversation_members.conversation_id** → Foreign key referencing **conversations.id**.
+1. **messages.conversation_id** → Foreign key referencing **conversations.id**.
+2. **conversation_members.conversation_id** → Foreign key referencing **conversations.id**.
 
 ---
 

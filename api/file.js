@@ -22,49 +22,40 @@ const upload = multer({
 
 module.exports = function () {
   // File upload endpoint
-  router.post("/upload"),
-    upload.single("file"),
-    async (req, res) => {
-      try {
-        if (!req.file) {
-          return res.status(400).json({ error: "No file uploaded" });
-        }
-
-        const { userId } = req.auth;
-        const file = req.file;
-
-        // Generate unique filename and ID
-        const fileId = crypto.randomBytes(16).toString("hex");
-        const fileExtension = file.originalname.split(".").pop();
-        const fileName = `${fileId}.${fileExtension}`;
-
-        // Upload to S3
-        const uploadParams = {
-          Bucket: process.env.AWS_BUCKET_NAME,
-          Key: fileName,
-          Body: file.buffer,
-          ContentType: file.mimetype,
-        };
-
-        await s3Client.send(new PutObjectCommand(uploadParams));
-
-        // Return file metadata to be stored in message's file_attachments
-        const fileMetadata = {
-          id: fileId,
-          file_name: file.originalname,
-          file_type: file.mimetype,
-          file_size: file.size,
-          file_url: `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`,
-        };
-
-        res.json(fileMetadata);
-      } catch (error) {
-        console.error("Detailed upload error:", error);
-        res.status(500).json({
-          error: "Error uploading file",
-          details: error.message,
-        });
+  router.post("/upload", upload.single("file"), async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No file provided" });
       }
-    };
+
+      const fileId = crypto.randomBytes(16).toString("hex");
+      const fileExtension = req.file.originalname.split(".").pop();
+      const key = `uploads/${fileId}.${fileExtension}`;
+
+      const command = new PutObjectCommand({
+        Bucket: process.env.AWS_BUCKET_NAME,
+        Key: key,
+        Body: req.file.buffer,
+        ContentType: req.file.mimetype,
+        ACL: "public-read",
+      });
+
+      await s3Client.send(command);
+
+      const fileUrl = `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+
+      res.json({
+        id: fileId,
+        file_name: req.file.originalname,
+        file_url: fileUrl,
+        file_type: req.file.mimetype,
+        file_size: req.file.size,
+      });
+    } catch (error) {
+      console.error("File upload error:", error);
+      res.status(500).json({ error: "Upload failed" });
+    }
+  });
+
   return router;
 };
