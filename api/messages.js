@@ -73,7 +73,7 @@ module.exports = function () {
       // Get message with both channel_id and conversation_id
       const { data: message, error: fetchError } = await supabase
         .from("messages")
-        .select("reactions, channel_id, conversation_id")
+        .select("reactions, conversation_id")
         .eq("id", messageId)
         .single();
 
@@ -117,9 +117,7 @@ module.exports = function () {
 
 
       // Trigger appropriate Pusher event based on message type
-      const eventChannel = message.channel_id
-        ? `channel-${message.channel_id}`
-        : `conversation-${message.conversation_id}`;
+      const eventChannel = `conversation-${message.conversation_id}`;
 
       await pusher.trigger(eventChannel, "message-updated", updatedMessage);
 

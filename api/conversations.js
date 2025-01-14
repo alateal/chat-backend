@@ -41,13 +41,7 @@ module.exports = function () {
 
       if (error) throw error;
 
-      res.json({
-        conversation: {
-          ...conversation,
-          conversation_members
-        },
-        messages
-      });
+      res.json(messages);
     } catch (error) {
       console.error("Error:", error);
       res.status(500).json({ error: "Error fetching messages" });

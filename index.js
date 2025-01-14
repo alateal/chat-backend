@@ -40,87 +40,53 @@ app.use('/api', requireAuth({ signInUrl: '/sign-in' }), apiRouter());
 app.post('/webhooks/clerk', 
   express.raw({ type: 'application/json' }),
   async (req, res) => {
-    try {
-      const webhook = new Webhook(process.env.CLERK_WEBHOOK_SECRET);
-      const event = webhook.verify(JSON.stringify(req.body), req.headers);
+    const evt = req.body;
+    const { type, data } = evt;
 
-      // Handle user creation
-      if (event.type === 'user.created') {
-        const userId = event.data.id;
-        
-        // Initialize user status
-        await supabase
-          .from('user_status')
-          .insert([{ 
-            user_id: userId, 
-            is_online: false 
-          }]);
+    console.log(`Received Clerk webhook: ${type}`);
 
-        // Get full user details and notify frontend
-        const user = await clerkClient.users.getUser(userId);
-        const newUser = {
-          id: user.id,
-          username: user.username || `${user.firstName} ${user.lastName}`.trim() || 'Unknown User',
-          imageUrl: user.imageUrl,
-          email: user.emailAddresses?.[0]?.emailAddress
-        };
-        await pusher.trigger('presence', 'user-created', newUser);
-        console.log('Initialized status for new user:', userId);
+    if (type === 'user.created') {
+      try {
+        // First, find the "general" conversation
+        const { data: generalChannel, error: findError } = await supabase
+          .from('conversations')
+          .select('id')
+          .eq('name', 'general')
+          .eq('is_channel', true)
+          .single();
+
+        if (findError) {
+          console.error('Error finding general channel:', findError);
+          return res.status(500).json({ error: 'Error finding general channel' });
+        }
+
+        if (!generalChannel) {
+          console.error('General channel not found');
+          return res.status(404).json({ error: 'General channel not found' });
+        }
+
+        // Add the new user to the general channel
+        const { error: memberError } = await supabase
+          .from('conversation_members')
+          .insert({
+            conversation_id: generalChannel.id,
+            user_id: data.id
+          });
+
+        if (memberError) {
+          console.error('Error adding user to general channel:', memberError);
+          return res.status(500).json({ error: 'Error adding user to general channel' });
+        }
+
+        console.log(`Added user ${data.id} to general channel`);
+      } catch (error) {
+        console.error('Error processing user.created webhook:', error);
+        return res.status(500).json({ error: 'Internal server error' });
       }
-
-      // Handle session creation (user going online)
-      if (event.type === 'session.created') {
-        const userId = event.data.user_id;
-        
-        // Update user status to online
-        const { error: updateError } = await supabase
-          .from('user_status')
-          .update({ is_online: true })
-          .eq('user_id', userId);
-
-        if (updateError) throw updateError;
-
-        // Get user details and notify frontend
-        const user = await clerkClient.users.getUser(userId);
-        const statusUpdate = {
-          userId,
-          isOnline: true,
-          username: user.username || `${user.firstName} ${user.lastName}`.trim() || 'Unknown User',
-          imageUrl: user.imageUrl
-        };
-
-        await pusher.trigger('presence', 'status-updated', statusUpdate);
-      }
-
-      // Handle session end/removal (user going offline)
-      if (event.type === 'session.removed' || event.type === 'session.ended') {
-        const userId = event.data.user_id;
-        
-        // Update user status to offline
-        const { error: updateError } = await supabase
-          .from('user_status')
-          .update({ is_online: false })
-          .eq('user_id', userId);
-
-        if (updateError) throw updateError;
-
-        // Get user details and notify frontend
-        const user = await clerkClient.users.getUser(userId);
-        const statusUpdate = {
-          userId,
-          isOnline: false,
-          username: user.username || `${user.firstName} ${user.lastName}`.trim() || 'Unknown User',
-          imageUrl: user.imageUrl
-        };
-
-        await pusher.trigger('presence', 'status-updated', statusUpdate);
-      }
-
-      res.json({ received: true });
-    } catch (error) {
-      console.error('Webhook error:', error);
-      res.status(400).json({ error: 'Webhook error' });
     }
+
+    // Handle other webhook events...
+    res.json({ received: true });
 });
 
 app.get('/', (req, res) => {
