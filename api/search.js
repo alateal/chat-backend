@@ -7,124 +7,104 @@ module.exports = function () {
   router.get("/", async (req, res) => {
     try {
       const { query } = req.query;
+      const { userId } = req.auth;
 
-      if (!query || query.length < 1) {
-        return res.json({ messages: [], users: [], files: [], channels: [] });
+      if (!query) {
+        return res.json({
+          messages: [],
+          channels: [],
+          users: [],
+          files: []
+        });
       }
 
-      // Search channels
-      const { data: channels, error: channelsError } = await supabase
-        .from("channels")
-        .select("*")
-        .ilike("name", `%${query}%`)
-        .order("created_at", { ascending: false })
-        .limit(10);
-
-      if (channelsError) throw channelsError;
-
-      // Only search users if query is 3+ characters
-      let users = [];
-      if (query.length >= 3) {
-        try {
-          const userList = await clerkClient.users.getUserList();
-          const allUsers = userList?.data || userList || [];
-
-          users = allUsers
-            .filter((user) => {
-              const firstName = user.firstName || "";
-              const lastName = user.lastName || "";
-              const username = user.username || "";
-
-              const searchString =
-                `${firstName} ${lastName} ${username}`.toLowerCase();
-              const searchQuery = query.toLowerCase();
-
-              return searchString.includes(searchQuery);
-            })
-            .slice(0, 10);
-        } catch (error) {
-          console.error("Clerk user search error:", error);
-        }
-      }
-
-      // Search messages and files
+      // Search messages (allow any length)
       const { data: messages, error: messagesError } = await supabase
         .from("messages")
-        .select("*, channel_id, conversation_id, file_attachments")
-        .or(
-          `content.ilike.%${query}%, file_attachments->files->>file_name.ilike.%${query}%`
-        )
-        .order("created_at", { ascending: false })
-        .limit(10);
+        .select(`
+          *,
+          conversation:conversation_id (
+            name,
+            is_channel
+          )
+        `)
+        .ilike("content", `%${query}%`)
+        .limit(5);
 
       if (messagesError) throw messagesError;
 
-      // Extract files from messages
-      const files = messages
-        ?.filter((msg) => msg.file_attachments?.files)
-        .flatMap((msg) => msg.file_attachments.files)
-        .filter((file) =>
-          file.file_name.toLowerCase().includes(query.toLowerCase())
-        )
-        .slice(0, 10);
+      // Search conversations/channels (allow any length)
+      const { data: channels, error: channelsError } = await supabase
+        .from("conversations")
+        .select("*")
+        .eq("is_channel", true)
+        .ilike("name", `%${query}%`)
+        .limit(5);
 
-      // Get user details for messages
-      const messagesWithUsers = await Promise.all(
-        messages?.map(async (message) => {
-          const user = await clerkClient.users.getUser(message.created_by);
-          return {
-            ...message,
-            user: {
-              id: user.id,
-              username:
-                user.username ||
-                `${user.firstName || ""} ${user.lastName || ""}`.trim() ||
-                "Unknown User",
-              imageUrl: user.imageUrl,
-            },
-          };
-        }) || []
-      );
+      if (channelsError) throw channelsError;
 
-      // Format user results
-      const formattedUsers = users.map((user) => ({
-        id: user.id,
-        username:
-          user.username ||
-          `${user.firstName || ""} ${user.lastName || ""}`.trim() ||
-          "Unknown User",
-        imageUrl: user.imageUrl,
-        email: user.emailAddresses?.[0]?.emailAddress,
+      // Search users (only if query length >= 3)
+      let users = [];
+      if (query.length >= 3) {
+        try {
+          const clerkUsers = await clerkClient.users.getUserList({
+            query: query,
+            limit: 5
+          });
+          
+          // Ensure we have an array and format the users
+          users = Array.isArray(clerkUsers) ? clerkUsers : clerkUsers.data || [];
+        } catch (error) {
+          console.error('Error fetching users from Clerk:', error);
+          users = []; // Fallback to empty array on error
+        }
+      }
+
+      // Format response
+      const formattedMessages = await Promise.all(messages.map(async message => {
+        const user = await clerkClient.users.getUser(message.created_by);
+        return {
+          id: message.id,
+          content: message.content,
+          created_at: message.created_at,
+          conversation_id: message.conversation_id,
+          user: {
+            id: user.id,
+            username: user.username || `${user.firstName} ${user.lastName}`.trim() || 'Unknown User',
+            imageUrl: user.imageUrl
+          }
+        };
       }));
 
-      // Add creator details to channels
-      const channelsWithCreators = await Promise.all(
-        channels?.map(async (channel) => {
-          const creator = await clerkClient.users.getUser(channel.created_by);
-          return {
-            ...channel,
-            creator: {
-              id: creator.id,
-              username:
-                creator.username ||
-                `${creator.firstName || ""} ${creator.lastName || ""}`.trim() ||
-                "Unknown User",
-              imageUrl: creator.imageUrl,
-            },
-          };
-        }) || []
-      );
+      const formattedChannels = channels.map(channel => ({
+        id: channel.id,
+        name: channel.name,
+        created_at: channel.created_at,
+        creator: {
+          id: channel.created_by,
+          username: 'Unknown User',
+          imageUrl: ''
+        }
+      }));
+
+      const formattedUsers = (Array.isArray(users) ? users : []).map(user => ({
+        id: user.id,
+        username: user.username || `${user.firstName} ${user.lastName}`.trim() || 'Unknown User',
+        imageUrl: user.imageUrl
+      }));
 
       res.json({
-        messages: messagesWithUsers,
+        messages: formattedMessages,
+        channels: formattedChannels,
         users: formattedUsers,
-        files,
-        channels: channelsWithCreators,
+        files: [] // Add file search later if needed
       });
+
     } catch (error) {
-      console.error("Search error:", error);
-      res.status(500).json({ error: "Search failed" });
+      console.error('Search error:', error);
+      res.status(500).json({ error: 'Error performing search' });
     }
   });
+
   return router;
 };

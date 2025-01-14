@@ -84,7 +84,6 @@ app.post('/webhooks/clerk',
         return res.status(500).json({ error: 'Internal server error' });
       }
     }
-
     // Handle other webhook events...
     res.json({ received: true });
 });
