@@ -40,19 +40,186 @@ async function initVectorStore() {
   return vectorStore;
 }
 
-async function searchSimilarMessages(query, limit = 5) {
+async function generateMessageVariations(message) {
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [
+        {
+          role: "system",
+          content: `You are a helpful assistant. Please rephrase the following message in 5 different ways, 
+          focusing on food-related aspects. Keep the same meaning but use different words and structures. 
+          Format your response as a numbered list from 1-5.`
+        },
+        { role: "user", content: message }
+      ],
+      temperature: 0.7,
+      max_tokens: 300
+    });
+
+    // Extract the variations from the response
+    const variations = response.choices[0].message.content
+      .split('\n')
+      .filter(line => line.trim().match(/^\d+\./)) // Get only numbered lines
+      .map(line => line.replace(/^\d+\.\s*/, '')); // Remove numbers
+
+    console.log("Generated variations:", variations);
+    return variations;
+  } catch (error) {
+    console.error("Error generating variations:", error);
+    return [message]; // Return original message if error
+  }
+}
+
+async function analyzeSearchResults(searchResults) {
+  try {
+    if (!searchResults || searchResults.length === 0) {
+      return [];
+    }
+
+    // Batch analyze all search results at once for efficiency
+    const response = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [
+        {
+          role: "system",
+          content: `Analyze each message and determine if it's a question or contains food recommendations.
+          For each message, respond with an object containing:
+          - isQuestion: true if it's a question, false otherwise
+          - hasFoodRecommendation: true if it contains food recommendations, false otherwise
+          
+          Respond with a JSON array matching the number of input messages.
+          Example: [{"isQuestion": true, "hasFoodRecommendation": false}, {"isQuestion": false, "hasFoodRecommendation": true}]`
+        },
+        {
+          role: "user",
+          content: JSON.stringify(searchResults.map(doc => doc.metadata.content))
+        }
+      ],
+      temperature: 0,
+      max_tokens: 500
+    });
+
+    let analysisArray;
+    try {
+      analysisArray = JSON.parse(response.choices[0].message.content);
+      
+      // Validate that we got an array
+      if (!Array.isArray(analysisArray)) {
+        console.error("Response is not an array:", analysisArray);
+        return searchResults;
+      }
+      
+    } catch (parseError) {
+      console.error("Error parsing OpenAI response:", parseError);
+      return searchResults;
+    }
+
+    // Pair each result with its analysis and sort
+    const analyzedResults = searchResults.map((doc, index) => ({
+      ...doc,
+      analysis: {
+        isQuestion: !!analysisArray[index]?.isQuestion,
+        hasFoodRecommendation: !!analysisArray[index]?.hasFoodRecommendation
+      }
+    }));
+
+    // Sort results: food recommendations first, then non-questions, then questions
+    return analyzedResults.sort((a, b) => {
+      // Helper function to get sort priority
+      const getPriority = (result) => {
+        if (!result.analysis) return 2; // Default priority if analysis is missing
+        if (result.analysis.hasFoodRecommendation) return 0;
+        if (!result.analysis.isQuestion) return 1;
+        return 2;
+      };
+
+      return getPriority(a) - getPriority(b);
+    });
+
+  } catch (error) {
+    console.error("Error analyzing search results:", error);
+    return searchResults; // Return original results if analysis fails
+  }
+}
+
+async function searchSimilarMessages(query, conversationId, limit = 5) {
   try {
     const store = await initVectorStore();
-    console.log("Searching for:", query);
+    console.log("Searching for context using variations...");
     
-    const results = await store.similaritySearch(query, limit);
-    console.log("Search results:", results);
+    // Generate variations of the query
+    const queryVariations = await generateMessageVariations(query);
     
-    // Format results for context
-    const formattedContext = results
-      .map(doc => `Message: ${doc.metadata.content}`)
-      .join('\n');
+    // Search for each variation
+    const searchPromises = queryVariations.map(variation => 
+      store.similaritySearch(variation, 2, {
+        filter: (doc) => {
+          if (doc.metadata.content === query) return false;
+          
+          return (
+            doc.metadata.conversationId === conversationId ||
+            doc.metadata.created_by === "user_ai" ||
+            doc.metadata.content.toLowerCase().includes("food") ||
+            doc.metadata.content.toLowerCase().includes("restaurant") ||
+            doc.metadata.content.toLowerCase().includes("place") ||
+            doc.metadata.content.toLowerCase().includes("eat")
+          );
+        }
+      })
+    );
+
+    // Combine all search results
+    const allResults = (await Promise.all(searchPromises)).flat();
+
+    // Analyze and prioritize results
+    const analyzedResults = await analyzeSearchResults(allResults);
+    
+    // Enhanced deduplication with similarity check
+    const uniqueResults = [];
+    const seenContent = new Set();
+    
+    analyzedResults.forEach(doc => {
+      const content = doc.metadata.content.toLowerCase().trim();
       
+      if (seenContent.has(content)) return;
+      
+      // Check for similar content using basic similarity
+      const isTooSimilar = uniqueResults.some(existingDoc => {
+        const existingContent = existingDoc.metadata.content.toLowerCase().trim();
+        
+        // Check if one string contains most of the other
+        if (existingContent.includes(content) || content.includes(existingContent)) {
+          return true;
+        }
+        
+        // Check for word overlap
+        const words1 = new Set(content.split(/\s+/));
+        const words2 = new Set(existingContent.split(/\s+/));
+        const overlap = [...words1].filter(word => words2.has(word)).length;
+        const similarity = overlap / Math.max(words1.size, words2.size);
+        
+        return similarity > 0.7; // Adjust threshold as needed
+      });
+      
+      if (!isTooSimilar) {
+        uniqueResults.push(doc);
+        seenContent.add(content);
+      }
+    });
+    
+    const formattedContext = uniqueResults
+      .sort((a, b) => new Date(a.metadata.created_at) - new Date(b.metadata.created_at))
+      .map(doc => {
+        const prefix = doc.metadata.created_by === "user_ai" ? "Piggy" : "User";
+        const conversationType = doc.metadata.conversationId === conversationId 
+          ? "current conversation" 
+          : "related conversation";
+        return `${prefix} (${conversationType}): ${doc.metadata.content}`;
+      })
+      .join('\n\n');
+
+    console.log("Found unique conversations:", uniqueResults.length);
     return formattedContext;
   } catch (error) {
     console.error("Error searching similar messages:", error);
@@ -69,11 +236,11 @@ async function getAIResponse(userMessage, relevantContext) {
       messages: [
         {
           role: "system",
-          content: `You are a helpful and knowledgeable foodie who has been living in New York for a long time. 
+          content: `Your name is Piggy. You are a helpful and knowledgeable foodie who has travelled the world and knows a lot about food. 
           If available, use this context from previous conversations: ${relevantContext || 'No context available'}
           
-          Be friendly, conversational, and share specific details about NYC food scene when relevant.
-          If you don't have relevant context for a specific query, just share your general knowledge about NYC food.`
+          Be friendly, conversational, and share specific details about the food scene when relevant.
+          If you don't have relevant context for a specific query, just share your general knowledge about food.`
         },
         { role: "user", content: userMessage }
       ],
@@ -85,6 +252,22 @@ async function getAIResponse(userMessage, relevantContext) {
   } catch (error) {
     console.error("Error getting AI response:", error);
     return "I apologize, but I'm having trouble processing your request right now. Could you please try again?";
+  }
+}
+
+// Add retry utility function at the top
+async function retryOperation(operation, maxRetries = 3, delay = 1000) {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (i === maxRetries - 1) throw error;
+      
+      console.log(`Attempt ${i + 1} failed, retrying in ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      // Exponential backoff
+      delay *= 2;
+    }
   }
 }
 
@@ -121,28 +304,32 @@ module.exports = function () {
         return res.status(400).json({ error: "Conversation ID required" });
       }
 
-      // Get conversation members to check for AI
-      const { data: members, error: membersError } = await supabase
-        .from("conversation_members")
-        .select("user_id")
-        .eq("conversation_id", conversation_id);
+      // Get conversation members with retry
+      const { data: members, error: membersError } = await retryOperation(async () => 
+        await supabase
+          .from("conversation_members")
+          .select("user_id")
+          .eq("conversation_id", conversation_id)
+      );
 
       if (membersError) throw membersError;
 
-      // Create user's message
-      const { data: message, error } = await supabase
-        .from("messages")
-        .insert([
-          {
-            content,
-            conversation_id,
-            created_by: userId,
-            file_attachments: files?.length ? files : null,
-            parent_message_id: parent_message_id || null,
-          },
-        ])
-        .select()
-        .single();
+      // Create user's message with retry
+      const { data: message, error } = await retryOperation(async () =>
+        await supabase
+          .from("messages")
+          .insert([
+            {
+              content,
+              conversation_id,
+              created_by: userId,
+              file_attachments: files?.length ? files : null,
+              parent_message_id: parent_message_id || null,
+            },
+          ])
+          .select()
+          .single()
+      );
 
       if (error) throw error;
 
@@ -157,43 +344,49 @@ module.exports = function () {
       const hasAI = members.some(member => member.user_id === "user_ai");
       
       if (hasAI) {
-        console.log("AI conversation detected, searching for context...");
-        
-        // Search for relevant context
-        const relevantContext = await searchSimilarMessages(content);
-        console.log("Found relevant context:", relevantContext);
-        
-        // Get AI response
-        const aiResponse = await getAIResponse(content, relevantContext);
-        console.log("Generated AI response");
+        try {
+          const relevantContext = await retryOperation(() => 
+            searchSimilarMessages(content, conversation_id)
+          );
+          
+          const aiResponse = await retryOperation(() => 
+            getAIResponse(content, relevantContext)
+          );
 
-        // Create AI's response
-        const { data: aiMessage, error: aiError } = await supabase
-          .from("messages")
-          .insert([
-            {
-              content: aiResponse,
-              conversation_id,
-              created_by: "user_ai"
-            }
-          ])
-          .select()
-          .single();
+          const { data: aiMessage, error: aiError } = await retryOperation(async () =>
+            await supabase
+              .from("messages")
+              .insert([{
+                content: aiResponse,
+                conversation_id,
+                created_by: "user_ai"
+              }])
+              .select()
+              .single()
+          );
 
-        if (aiError) throw aiError;
+          if (aiError) throw aiError;
 
-        // Trigger Pusher event for AI's message
-        await pusher.trigger(
-          `conversation-${conversation_id}`,
-          "new-message",
-          aiMessage
-        );
+          await retryOperation(() =>
+            pusher.trigger(
+              `conversation-${conversation_id}`,
+              "new-message",
+              aiMessage
+            )
+          );
+        } catch (aiError) {
+          console.error("Error generating AI response:", aiError);
+          // Continue execution even if AI response fails
+        }
       }
 
       res.json(message);
     } catch (error) {
       console.error("Error:", error);
-      res.status(500).json({ error: "Error creating message" });
+      res.status(500).json({ 
+        error: "Error creating message",
+        details: error.message 
+      });
     }
   });
 
