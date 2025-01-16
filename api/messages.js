@@ -296,7 +296,8 @@ module.exports = function () {
       const { userId } = req.auth;
       const { content, files, conversation_id, parent_message_id } = req.body;
 
-      if (!content && !files?.length) {
+      // Allow empty content if files are present
+      if (!content && (!files || files.length === 0)) {
         return res.status(400).json({ error: "Content or files required" });
       }
 
@@ -314,16 +315,16 @@ module.exports = function () {
 
       if (membersError) throw membersError;
 
-      // Create user's message with retry
+      // Create message with file attachments
       const { data: message, error } = await retryOperation(async () =>
         await supabase
           .from("messages")
           .insert([
             {
-              content,
+              content: content || '', // Ensure content is never null
               conversation_id,
               created_by: userId,
-              file_attachments: files?.length ? files : null,
+              file_attachments: files || null,
               parent_message_id: parent_message_id || null,
             },
           ])

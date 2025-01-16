@@ -1,8 +1,8 @@
 const express = require("express");
 const router = express.Router();
-const multer = require("multer");
 const crypto = require("crypto");
-const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -13,47 +13,50 @@ const s3Client = new S3Client({
   },
 });
 
-// Configure multer for file upload
-const upload = multer({
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB limit
-  },
-});
-
 module.exports = function () {
-  // File upload endpoint
-  router.post("/upload", upload.single("file"), async (req, res) => {
+  // Get presigned URL endpoint
+  router.post("/upload", async (req, res) => {
     try {
-      if (!req.file) {
-        return res.status(400).json({ error: "No file provided" });
+      // Validate required fields
+      if (!req.body.fileName || !req.body.fileType) {
+        return res.status(400).json({ error: "fileName and fileType are required" });
+      }
+
+      // Validate AWS configuration
+      if (!process.env.AWS_BUCKET_NAME || !process.env.AWS_REGION) {
+        console.error('Missing AWS configuration');
+        return res.status(500).json({ error: "Server configuration error" });
       }
 
       const fileId = crypto.randomBytes(16).toString("hex");
-      const fileExtension = req.file.originalname.split(".").pop();
+      const fileExtension = req.body.fileName.split(".").pop();
       const key = `uploads/${fileId}.${fileExtension}`;
 
+      // Create the presigned URL command
       const command = new PutObjectCommand({
         Bucket: process.env.AWS_BUCKET_NAME,
         Key: key,
-        Body: req.file.buffer,
-        ContentType: req.file.mimetype,
+        ContentType: req.body.fileType,
         ACL: "public-read",
       });
 
-      await s3Client.send(command);
+      // Generate presigned URL that expires in 15 minutes
+      const presignedUrl = await getSignedUrl(s3Client, command, { expiresIn: 900 });
 
-      const fileUrl = `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+      const response = {
+        uploadUrl: presignedUrl,
+        fileUrl: `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`,
+        fileId: fileId
+      };
 
-      res.json({
-        id: fileId,
-        file_name: req.file.originalname,
-        file_url: fileUrl,
-        file_type: req.file.mimetype,
-        file_size: req.file.size,
-      });
+      res.json(response);
     } catch (error) {
-      console.error("File upload error:", error);
-      res.status(500).json({ error: "Upload failed" });
+      console.error('Error generating presigned URL:', error);
+      res.status(500).json({ 
+        error: "Failed to generate upload URL", 
+        details: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      });
     }
   });
 
