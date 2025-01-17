@@ -72,19 +72,21 @@ async function generateAudioForMessage(text, messageId) {
       responseType: 'arraybuffer'
     });
 
-    const audioBuffer = response.data;
+    console.log('Audio generated successfully');
 
     // Upload to S3
     await s3Client.send(
       new PutObjectCommand({
         Bucket: BUCKET_NAME,
         Key: cacheKey,
-        Body: audioBuffer,
+        Body: response.data,
         ContentType: 'audio/mpeg',
       })
     );
 
-    // Generate signed URL for the uploaded file
+    console.log('Audio uploaded to S3');
+
+    // Generate signed URL
     const url = await getSignedUrl(
       s3Client,
       new GetObjectCommand({
@@ -94,9 +96,16 @@ async function generateAudioForMessage(text, messageId) {
       { expiresIn: AUDIO_CACHE_DURATION }
     );
 
+    console.log('Generated signed URL:', url);
+
     return { url, cached: false };
   } catch (error) {
-    console.error("Error generating audio:", error);
+    console.error("Error in generateAudioForMessage:", error);
+    if (error.response) {
+      // Parse the buffer to see the actual error message
+      const errorMessage = Buffer.from(error.response.data).toString('utf8');
+      console.error("ElevenLabs API error:", errorMessage);
+    }
     throw error;
   }
 }

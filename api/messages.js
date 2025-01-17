@@ -26,6 +26,8 @@ const pc = new Pinecone({
 // Initialize vector store once
 let vectorStore = null;
 
+const activeResponses = new Map(); // Track messages being processed with timestamps
+
 async function initVectorStore() {
   if (!vectorStore) {
     try {
@@ -321,6 +323,53 @@ async function retryOperation(operation, maxRetries = 3, delay = 1000) {
   }
 }
 
+// Add cleanup function to remove stale locks
+function cleanupStaleLocks() {
+  const now = Date.now();
+  for (const [conversationId, timestamp] of activeResponses.entries()) {
+    // Remove locks older than 30 seconds
+    if (now - timestamp > 30000) {
+      activeResponses.delete(conversationId);
+    }
+  }
+}
+
+// Fix the acquireLock function - it was returning true when locked!
+function acquireLock(conversationId) {
+  cleanupStaleLocks();
+  if (activeResponses.has(conversationId)) {
+    return false; // Return false if already locked
+  }
+  activeResponses.set(conversationId, Date.now());
+  return true;
+}
+
+function releaseLock(conversationId) {
+  activeResponses.delete(conversationId);
+}
+
+// Add function to check if Piggy is in conversation
+async function isPiggyInConversation(conversationId) {
+  try {
+    const { data: members, error } = await supabase
+      .from("conversation_members")
+      .select("user_id")
+      .eq("conversation_id", conversationId)
+      .eq("user_id", "user_ai")
+      .single();
+
+    if (error) {
+      console.error("Error checking Piggy participation:", error);
+      return false;
+    }
+
+    return !!members;
+  } catch (error) {
+    console.error("Error in isPiggyInConversation:", error);
+    return false;
+  }
+}
+
 module.exports = function () {
   // Initialize vector store when the server starts
   initVectorStore().catch(console.error);
@@ -343,42 +392,128 @@ module.exports = function () {
 
   router.post("/", async (req, res) => {
     try {
-      const { content, conversation_id, hasAI = true, files, parent_message_id } = req.body;
+      const { content, conversation_id, parent_message_id, file_attachments, files } = req.body;
+      const user_id = req.auth.userId;
 
-      // Allow empty content if files are present
-      if (!content && (!files || files.length === 0)) {
-        return res.status(400).json({ error: "Content or files required" });
+      // Debug logging
+      console.log("Raw request body:", req.body);
+
+      // Validate conversation_id
+      if (!conversation_id) {
+        return res.status(400).json({ error: "conversation_id is required" });
       }
 
-      // Create the user message first
-      const { data: message, error: messageError } = await supabase
+      // Validate and process file attachments - handle both files and file_attachments
+      let validFiles = [];
+      const attachments = files || file_attachments; // Use whichever is present
+
+      if (attachments) {
+        console.log("Processing attachments:", attachments);
+        
+        // Ensure attachments is an array
+        const fileArray = Array.isArray(attachments) ? attachments : [attachments];
+        
+        validFiles = fileArray.filter(file => {
+          if (!file) return false;
+          
+          // Handle both naming conventions
+          const fileName = file.name || file.file_name;
+          const fileType = file.type || file.file_type;
+          const fileUrl = file.url || file.file_url;
+          const fileSize = file.size || file.file_size;
+
+          const isValid = fileName && fileType && fileUrl;
+          
+          if (isValid) {
+            // Normalize the file object structure
+            return {
+              name: fileName,
+              type: fileType,
+              url: fileUrl,
+              size: fileSize || 0
+            };
+          }
+
+          console.log("Invalid file:", file);
+          return false;
+        });
+      }
+
+      // Log valid files
+      console.log("Valid files after processing:", validFiles);
+
+      // Check for valid content or files
+      const hasContent = content && content.trim().length > 0;
+      const hasFiles = validFiles.length > 0;
+
+      if (!hasContent && !hasFiles) {
+        return res.status(400).json({ 
+          error: "Message must contain either text content or valid file attachments" 
+        });
+      }
+
+      // Create message object
+      const messageData = {
+        content: content || '', 
+        conversation_id,
+        created_by: user_id,
+        parent_message_id: parent_message_id || null,
+        file_attachments: validFiles.length > 0 ? validFiles : null
+      };
+
+      console.log("Final message data:", messageData);
+
+      // Insert message
+      const { data: message, error } = await supabase
         .from("messages")
-        .insert([{
-          content,
-          conversation_id,
-          created_by: req.auth.userId
-        }])
+        .insert([messageData])
         .select()
         .single();
 
-      if (messageError) throw messageError;
+      if (error) {
+        console.error("Database error:", error);
+        throw error;
+      }
 
-      // Emit the user message immediately
+      // Emit the user message
       await pusher.trigger(
         `conversation-${conversation_id}`,
         "new-message",
         message
       );
 
-      // Generate AI response if needed
-      if (hasAI) {
+      // Update isPiggyInConversation to handle no results
+      const piggyParticipation = await supabase
+        .from("conversation_members")
+        .select("user_id")
+        .eq("conversation_id", conversation_id)
+        .eq("user_id", "user_ai");
+
+      const piggyIsParticipant = piggyParticipation.data && piggyParticipation.data.length > 0;
+
+      // Check if this is a message that should trigger Piggy's response
+      const shouldRespond = user_id !== 'user_ai' && 
+                           !parent_message_id && 
+                           piggyIsParticipant;
+
+      if (shouldRespond && acquireLock(conversation_id)) {
         try {
+          let contextContent = content || '';
+          
+          // If there are file attachments, add them to the context with more details
+          if (file_attachments && file_attachments.length > 0) {
+            contextContent += '\n[User shared files: ' + 
+              file_attachments.map(file => 
+                `${file.name} (${file.type})`
+              ).join(', ') + ']';
+          }
+
           const relevantContext = await retryOperation(() => 
-            searchSimilarMessages(content, conversation_id)
+            searchSimilarMessages(contextContent, conversation_id)
           );
           
           const aiResponse = await retryOperation(() => 
-            getAIResponse(content, relevantContext)
+            getAIResponse(contextContent, relevantContext)
           );
 
           // Insert AI message with audio URL
@@ -407,17 +542,15 @@ module.exports = function () {
           );
         } catch (aiError) {
           console.error("Error generating AI response:", aiError);
-          // Continue execution even if AI response fails
+        } finally {
+          releaseLock(conversation_id);
         }
       }
 
       res.json(message);
     } catch (error) {
-      console.error("Error:", error);
-      res.status(500).json({ 
-        error: "Error creating message",
-        details: error.message 
-      });
+      console.error("Error in POST /messages:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   });
 
