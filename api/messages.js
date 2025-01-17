@@ -268,7 +268,8 @@ async function getAIResponse(content, relevantContext) {
           1. Use the provided context from conversations and files if relevant
           2. If you reference information from files, mention the file name
           3. Be friendly, conversational, and share specific details about the food scene when relevant
-          4. If you're not sure about something, say so rather than making assumptions`
+          4. If you're not sure about something, say so rather than making assumptions
+          5. Keep your responses concise and to the point, preferably under 30 words, but friendly and conversational.`
         },
         {
           role: "user",
