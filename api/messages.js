@@ -6,6 +6,7 @@ const { PineconeStore } = require("@langchain/pinecone");
 const { Pinecone } = require("@pinecone-database/pinecone");
 const supabase = require("../supabase");
 const pusher = require("../pusher");
+const { searchFiles } = require('../utils/fileSearch');
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
@@ -227,22 +228,49 @@ async function searchSimilarMessages(query, conversationId, limit = 5) {
   }
 }
 
-async function getAIResponse(userMessage, relevantContext) {
+async function getAIResponse(content, relevantContext) {
   try {
-    console.log("Context being used:", relevantContext);
+    // Search for relevant file content
+    const fileResults = await searchFiles(content);
     
+    // Prepare context from both conversation history and files
+    let contextPrompt = "";
+    
+    if (relevantContext && typeof relevantContext === 'string') {
+      contextPrompt += "\nRelevant conversation history:\n" + relevantContext;
+    }
+
+    if (fileResults.chunks.length > 0) {
+      contextPrompt += "\nRelevant information from files:\n" + 
+        fileResults.chunks.map(chunk => 
+          `- From ${chunk.fileName}: ${chunk.content}`
+        ).join("\n");
+    }
+
+    if (fileResults.summaries.length > 0) {
+      contextPrompt += "\nRelevant file summaries:\n" + 
+        fileResults.summaries.map(summary => 
+          `- Summary of ${summary.fileName}: ${summary.content}`
+        ).join("\n");
+    }
+
+    // Generate AI response
     const response = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages: [
         {
           role: "system",
-          content: `Your name is Piggy. You are a helpful and knowledgeable foodie who has travelled the world and knows a lot about food. 
-          If available, use this context from previous conversations: ${relevantContext || 'No context available'}
-          
-          Be friendly, conversational, and share specific details about the food scene when relevant.
-          If you don't have relevant context for a specific query, just share your general knowledge about food.`
+          content: `Your name is Piggy. You are a helpful and knowledgeable foodie who has travelled the world and knows a lot about food.
+          When answering questions:
+          1. Use the provided context from conversations and files if relevant
+          2. If you reference information from files, mention the file name
+          3. Be friendly, conversational, and share specific details about the food scene when relevant
+          4. If you're not sure about something, say so rather than making assumptions`
         },
-        { role: "user", content: userMessage }
+        {
+          role: "user",
+          content: `Context:\n${contextPrompt}\n\nUser message: ${content}`
+        }
       ],
       temperature: 0.7,
       max_tokens: 500
@@ -250,8 +278,8 @@ async function getAIResponse(userMessage, relevantContext) {
 
     return response.choices[0].message.content;
   } catch (error) {
-    console.error("Error getting AI response:", error);
-    return "I apologize, but I'm having trouble processing your request right now. Could you please try again?";
+    console.error("Error generating AI response:", error);
+    return "I apologize, but I encountered an error while processing your request. Please try again.";
   }
 }
 
