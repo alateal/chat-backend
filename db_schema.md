@@ -21,6 +21,7 @@
   - `conversation_id` (int8): Foreign key referencing `conversations.id`.
   - `file_attachments` (jsonb): JSON object storing details of file attachments.
   - `parent_message_id` (int8): Foreign key referencing `messages.id`.
+  - `audio_url` (text): URL of the audio file associated with the message.
 ---
 
 ---

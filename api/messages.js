@@ -7,6 +7,7 @@ const { Pinecone } = require("@pinecone-database/pinecone");
 const supabase = require("../supabase");
 const pusher = require("../pusher");
 const { searchFiles } = require('../utils/fileSearch');
+const { generateAudioForMessage } = require('../utils/audioService');
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
@@ -276,10 +277,31 @@ async function getAIResponse(content, relevantContext) {
       max_tokens: 500
     });
 
-    return response.choices[0].message.content;
+    const textResponse = response.choices[0].message.content;
+    
+    // Generate audio for the response
+    let audioUrl = null;
+    try {
+      const audioResult = await generateAudioForMessage(
+        textResponse,
+        `ai_${Date.now()}`
+      );
+      audioUrl = audioResult.url;
+    } catch (audioError) {
+      console.error("Error generating audio:", audioError);
+      // Continue without audio if generation fails
+    }
+
+    return {
+      text: textResponse,
+      audioUrl
+    };
   } catch (error) {
     console.error("Error generating AI response:", error);
-    return "I apologize, but I encountered an error while processing your request. Please try again.";
+    return {
+      text: "I apologize, but I encountered an error while processing your request. Please try again.",
+      audioUrl: null
+    };
   }
 }
 
@@ -321,57 +343,34 @@ module.exports = function () {
 
   router.post("/", async (req, res) => {
     try {
-      const { userId } = req.auth;
-      const { content, files, conversation_id, parent_message_id } = req.body;
+      const { content, conversation_id, hasAI = true, files, parent_message_id } = req.body;
 
       // Allow empty content if files are present
       if (!content && (!files || files.length === 0)) {
         return res.status(400).json({ error: "Content or files required" });
       }
 
-      if (!conversation_id) {
-        return res.status(400).json({ error: "Conversation ID required" });
-      }
+      // Create the user message first
+      const { data: message, error: messageError } = await supabase
+        .from("messages")
+        .insert([{
+          content,
+          conversation_id,
+          created_by: req.auth.userId
+        }])
+        .select()
+        .single();
 
-      // Get conversation members with retry
-      const { data: members, error: membersError } = await retryOperation(async () => 
-        await supabase
-          .from("conversation_members")
-          .select("user_id")
-          .eq("conversation_id", conversation_id)
-      );
+      if (messageError) throw messageError;
 
-      if (membersError) throw membersError;
-
-      // Create message with file attachments
-      const { data: message, error } = await retryOperation(async () =>
-        await supabase
-          .from("messages")
-          .insert([
-            {
-              content: content || '', // Ensure content is never null
-              conversation_id,
-              created_by: userId,
-              file_attachments: files || null,
-              parent_message_id: parent_message_id || null,
-            },
-          ])
-          .select()
-          .single()
-      );
-
-      if (error) throw error;
-
-      // Trigger Pusher event for user's message
+      // Emit the user message immediately
       await pusher.trigger(
         `conversation-${conversation_id}`,
         "new-message",
         message
       );
 
-      // Check if AI is in the conversation
-      const hasAI = members.some(member => member.user_id === "user_ai");
-      
+      // Generate AI response if needed
       if (hasAI) {
         try {
           const relevantContext = await retryOperation(() => 
@@ -382,13 +381,15 @@ module.exports = function () {
             getAIResponse(content, relevantContext)
           );
 
+          // Insert AI message with audio URL
           const { data: aiMessage, error: aiError } = await retryOperation(async () =>
             await supabase
               .from("messages")
               .insert([{
-                content: aiResponse,
+                content: aiResponse.text,
                 conversation_id,
-                created_by: "user_ai"
+                created_by: "user_ai",
+                audio_url: aiResponse.audioUrl // Add audio URL to the message
               }])
               .select()
               .single()
@@ -396,6 +397,7 @@ module.exports = function () {
 
           if (aiError) throw aiError;
 
+          // Emit AI message with audio URL
           await retryOperation(() =>
             pusher.trigger(
               `conversation-${conversation_id}`,
